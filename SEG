@@ -1,0 +1,484 @@
+--Create New Superuser Role
+CREATE ROLE db_admin WITH
+  LOGIN
+  SUPERUSER
+  CREATEDB
+  CREATEROLE
+  INHERIT
+  REPLICATION
+  BYPASSRLS
+  PASSWORD 'StrongPassword123';
+
+GRANT postgres TO db_admin;
+
+--Create directory (outside PostgreSQL) & tablespace
+CREATE TABLESPACE "SEG_tablespace"
+  OWNER db_admin
+  LOCATION E'C:\\SEG2102 DATABASE MANAGEMENT SYSTEMS';
+
+ALTER TABLESPACE "SEG_tablespace"
+  OWNER TO db_admin;
+
+--LOG OUT and connect to db_admin
+-- Create Database Using the Tablespace
+CREATE DATABASE access_control_db
+TABLESPACE "SEG_tablespace";  
+
+-- Create SCHEMA 
+CREATE SCHEMA IF NOT EXISTS dac_schema;
+CREATE SCHEMA IF NOT EXISTS rbac_schema;
+CREATE SCHEMA IF NOT EXISTS mac_schema;
+CREATE SCHEMA IF NOT EXISTS abac_schema;
+
+-- Create Tables in all schemas using a DO block
+DO $do$
+DECLARE
+    s TEXT;
+BEGIN
+    FOR s IN SELECT unnest(ARRAY['dac_schema','rbac_schema','mac_schema','abac_schema']) LOOP
+
+        -- Departments
+        EXECUTE format($sql$
+            CREATE TABLE IF NOT EXISTS %I.departments (
+                dept_id SERIAL PRIMARY KEY,
+                dept_name TEXT UNIQUE NOT NULL,
+                risk_level INT CHECK (risk_level BETWEEN 1 AND 5)
+            ) TABLESPACE "SEG_tablespace";
+        $sql$, s);
+
+        -- Roles
+        EXECUTE format($sql$
+            CREATE TABLE IF NOT EXISTS %I.roles (
+                role_id SERIAL PRIMARY KEY,
+                role_name TEXT UNIQUE NOT NULL,
+                description TEXT
+            ) TABLESPACE "SEG_tablespace";
+        $sql$, s);
+
+        -- Job Titles
+        EXECUTE format($sql$
+            CREATE TABLE IF NOT EXISTS %I.job_titles (
+                job_id SERIAL PRIMARY KEY,
+                title_name TEXT UNIQUE NOT NULL,
+                min_clearance INT CHECK (min_clearance BETWEEN 1 AND 5)
+            ) TABLESPACE "SEG_tablespace";
+        $sql$, s);
+
+        -- System Users (for ABAC)
+        EXECUTE format($sql$
+            CREATE TABLE IF NOT EXISTS %I.system_users (
+                user_id SERIAL PRIMARY KEY,
+                username TEXT UNIQUE NOT NULL,
+                dept_id INT REFERENCES %I.departments(dept_id),
+                role_id INT REFERENCES %I.roles(role_id),
+                clearance_level INT CHECK (clearance_level BETWEEN 1 AND 5),
+                employment_type TEXT CHECK (employment_type IN ('PERMANENT','CONTRACT','INTERN'))
+            ) TABLESPACE "SEG_tablespace";
+        $sql$, s, s, s);
+
+        -- Employees
+        EXECUTE format($sql$
+            CREATE TABLE IF NOT EXISTS %I.employees (
+                emp_id SERIAL PRIMARY KEY,
+                full_name TEXT NOT NULL,
+                dept_id INT REFERENCES %I.departments(dept_id),
+                job_id INT REFERENCES %I.job_titles(job_id),
+                hire_date DATE,
+                employment_status TEXT CHECK (employment_status IN ('ACTIVE','SUSPENDED','TERMINATED'))
+            ) TABLESPACE "SEG_tablespace";
+        $sql$, s, s, s);
+
+        -- Payroll
+        EXECUTE format($sql$
+            CREATE TABLE IF NOT EXISTS %I.payroll (
+                payroll_id SERIAL PRIMARY KEY,
+                emp_id INT REFERENCES %I.employees(emp_id),
+                base_salary INT,
+                bonus INT,
+                bank_account TEXT,
+                tax_id TEXT,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            ) TABLESPACE "SEG_tablespace";
+        $sql$, s, s);
+
+        -- Performance Reviews
+        EXECUTE format($sql$
+            CREATE TABLE IF NOT EXISTS %I.performance_reviews (
+                review_id SERIAL PRIMARY KEY,
+                emp_id INT REFERENCES %I.employees(emp_id),
+                review_year INT,
+                performance_score INT CHECK (performance_score BETWEEN 1 AND 5),
+                reviewer_id INT,
+                remarks TEXT
+            ) TABLESPACE "SEG_tablespace";
+        $sql$, s, s);
+
+        -- Projects
+        EXECUTE format($sql$
+            CREATE TABLE IF NOT EXISTS %I.projects (
+                project_id SERIAL PRIMARY KEY,
+                project_name TEXT,
+                owning_dept INT REFERENCES %I.departments(dept_id),
+                budget INT,
+                classification_level INT CHECK (classification_level BETWEEN 1 AND 5)
+            ) TABLESPACE "SEG_tablespace";
+        $sql$, s, s);
+
+        -- Project Assignments
+        EXECUTE format($sql$
+            CREATE TABLE IF NOT EXISTS %I.project_assignments (
+                emp_id INT REFERENCES %I.employees(emp_id),
+                project_id INT REFERENCES %I.projects(project_id),
+                role_in_project TEXT,
+                PRIMARY KEY (emp_id, project_id)
+            ) TABLESPACE "SEG_tablespace";
+        $sql$, s, s, s);
+
+        -- Documents (MAC)
+        EXECUTE format($sql$
+            CREATE TABLE IF NOT EXISTS %I.documents (
+                doc_id SERIAL PRIMARY KEY,
+                title TEXT,
+                classification_level INT CHECK (classification_level BETWEEN 1 AND 5),
+                owner_dept INT REFERENCES %I.departments(dept_id),
+                content TEXT
+            ) TABLESPACE "SEG_tablespace";
+        $sql$, s, s);
+
+    END LOOP;
+END
+$do$;
+
+--INSERT SAMPLE DATA INTO ALL SCHEMAS
+DO $do$
+DECLARE
+    s TEXT;
+BEGIN
+    FOR s IN SELECT unnest(ARRAY['dac_schema','rbac_schema','mac_schema','abac_schema']) LOOP
+
+        -- Departments
+        EXECUTE format($sql$
+            INSERT INTO %I.departments (dept_name, risk_level) VALUES
+            ('HR',2), ('IT',3), ('Finance',4), ('Management',5)
+            ON CONFLICT DO NOTHING;
+        $sql$, s);
+
+        -- Roles
+        EXECUTE format($sql$
+            INSERT INTO %I.roles (role_name, description) VALUES
+            ('staff','Standard employee'),
+            ('manager','Department manager'),
+            ('executive','Executive user'),
+            ('intern','Limited user')
+            ON CONFLICT DO NOTHING;
+        $sql$, s);
+
+        -- Job Titles
+        EXECUTE format($sql$
+            INSERT INTO %I.job_titles (title_name, min_clearance) VALUES
+            ('HR Officer',2),
+            ('Developer',3),
+            ('Accountant',4),
+            ('Director',5)
+            ON CONFLICT DO NOTHING;
+        $sql$, s);
+
+        -- System Users
+        EXECUTE format($sql$
+            INSERT INTO %I.system_users (username, dept_id, role_id, clearance_level, employment_type) VALUES
+            ('alice',1,1,2,'PERMANENT'),
+            ('bob',2,2,3,'PERMANENT'),
+            ('carol',3,3,4,'PERMANENT'),
+            ('dave',2,4,2,'CONTRACT'),
+            ('eve',4,2,5,'PERMANENT')
+            ('abac_alice', 1, 1, 5,'PERMANENT'),  
+            ('abac_bob', 2, 2, 4,'PERMANENT');   
+
+            ON CONFLICT DO NOTHING;
+        $sql$, s);
+
+        -- Employees
+        EXECUTE format($sql$
+            INSERT INTO %I.employees (full_name, dept_id, job_id, hire_date, employment_status) VALUES
+            ('Alice Smith',1,1,'2020-01-15','ACTIVE'),
+            ('Bob Johnson',2,2,'2019-06-01','ACTIVE'),
+            ('Carol Williams',3,3,'2018-03-20','ACTIVE'),
+            ('Dave Brown',2,2,'2021-07-10','ACTIVE'),
+            ('Eve Davis',4,4,'2017-11-05','SUSPENDED')
+            ON CONFLICT DO NOTHING;
+        $sql$, s);
+
+        -- Payroll
+        EXECUTE format($sql$
+            INSERT INTO %I.payroll (emp_id, base_salary, bonus, bank_account, tax_id) VALUES
+            (1,4000,500,'123-456-789','TX1001'),
+            (2,6000,1000,'234-567-890','TX1002'),
+            (3,5000,800,'345-678-901','TX1003'),
+            (4,5500,300,'456-789-012','TX1004'),
+            (5,9000,1500,'567-890-123','TX1005')
+            ON CONFLICT DO NOTHING;
+        $sql$, s);
+
+        -- Performance Reviews
+        EXECUTE format($sql$
+            INSERT INTO %I.performance_reviews (emp_id, review_year, performance_score, reviewer_id, remarks) VALUES
+            (1,2023,4,2,'Good performance'),
+            (2,2023,5,3,'Excellent work'),
+            (3,2023,3,4,'Satisfactory'),
+            (4,2023,4,2,'Reliable contributor'),
+            (5,2023,5,4,'Outstanding results')
+            ON CONFLICT DO NOTHING;
+        $sql$, s);
+
+        -- Projects
+        EXECUTE format($sql$
+            INSERT INTO %I.projects (project_name, owning_dept, budget, classification_level) VALUES
+            ('Payroll System Upgrade',1,50000,3),
+            ('Website Redesign',2,30000,2),
+            ('Annual Financial Audit',3,40000,4),
+            ('Corporate Strategy Plan',4,100000,5)
+            ON CONFLICT DO NOTHING;
+        $sql$, s);
+
+        -- Project Assignments
+        EXECUTE format($sql$
+            INSERT INTO %I.project_assignments (emp_id, project_id, role_in_project) VALUES
+            (1,1,'Lead'),
+            (2,2,'Developer'),
+            (3,3,'Accountant'),
+            (4,2,'Tester'),
+            (5,4,'Advisor')
+            ON CONFLICT DO NOTHING;
+        $sql$, s);
+
+        -- Documents
+        EXECUTE format($sql$
+            INSERT INTO %I.documents (title, classification_level, owner_dept, content) VALUES
+            ('Employee Handbook',2,1,'Company policies and guidelines.'),
+            ('IT Security Policy',3,2,'Security procedures for IT.'),
+            ('Financial Report 2023',4,3,'Detailed financial analysis for the year.'),
+            ('Strategic Plan 2024',5,4,'Management strategic planning document.')
+            ON CONFLICT DO NOTHING;
+        $sql$, s);
+
+    END LOOP;
+END
+$do$;
+
+
+-- Create Access Control Users Assigned to Employees
+-- DAC Users
+CREATE ROLE dac_alice LOGIN PASSWORD 'Password123';
+CREATE ROLE dac_bob LOGIN PASSWORD 'Password123';
+GRANT USAGE ON SCHEMA dac_schema TO dac_alice;
+GRANT USAGE ON SCHEMA dac_schema TO dac_bob;
+
+-- RBAC Users
+CREATE ROLE rbac_alice LOGIN PASSWORD 'Password123';
+CREATE ROLE rbac_bob LOGIN PASSWORD 'Password123';
+GRANT USAGE ON SCHEMA rbac_schema TO rbac_staff;
+GRANT USAGE ON SCHEMA rbac_schema TO rbac_manager;
+
+-- MAC Users
+CREATE ROLE mac_low LOGIN PASSWORD 'Password123';
+CREATE ROLE mac_high LOGIN PASSWORD 'Password123';
+GRANT USAGE ON SCHEMA mac_schema TO mac_low;
+GRANT USAGE ON SCHEMA mac_schema TO mac_high;
+GRANT SELECT ON mac_schema.documents TO mac_low;
+GRANT SELECT ON mac_schema.documents TO mac_high;
+
+-- ABAC Users
+CREATE ROLE abac_alice LOGIN PASSWORD 'Password123';
+CREATE ROLE abac_bob LOGIN PASSWORD 'Password123';
+GRANT USAGE ON SCHEMA abac_schema TO abac_alice;
+GRANT USAGE ON SCHEMA abac_schema TO abac_bob;
+GRANT SELECT ON abac_schema.employees TO abac_alice;
+GRANT SELECT ON abac_schema.employees TO abac_bob;
+GRANT SELECT ON abac_schema.system_users TO abac_alice;
+GRANT SELECT ON abac_schema.system_users TO abac_bob;
+GRANT SELECT ON abac_schema.job_titles TO abac_alice;
+GRANT SELECT ON abac_schema.job_titles TO abac_bob;
+
+-- DAC Privileges
+GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA dac_schema TO dac_alice;
+GRANT SELECT ON ALL TABLES IN SCHEMA dac_schema TO dac_bob;
+
+-- RBAC Setup
+CREATE ROLE rbac_staff;
+CREATE ROLE rbac_manager;
+
+GRANT SELECT, INSERT ON ALL TABLES IN SCHEMA rbac_schema TO rbac_staff;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA rbac_schema TO rbac_manager;
+
+GRANT rbac_staff TO rbac_alice;
+GRANT rbac_manager TO rbac_bob;
+
+-- MAC Setup (Row-Level Security)
+ALTER TABLE mac_schema.documents ENABLE ROW LEVEL SECURITY;
+
+-- Low clearance policy
+CREATE POLICY low_access ON mac_schema.documents
+    FOR SELECT
+    USING (classification_level <= 3);
+
+-- High clearance policy
+CREATE POLICY high_access ON mac_schema.documents
+    FOR SELECT
+    USING (classification_level <= 5);
+
+
+
+-- ABAC Setup (Row-Level Security)
+ALTER TABLE abac_schema.employees ENABLE ROW LEVEL SECURITY;
+
+-- Users can see only employees in their department
+CREATE POLICY dept_policy ON abac_schema.employees
+    USING (dept_id = (SELECT dept_id FROM abac_schema.system_users WHERE username = current_user));
+
+-- Users can see only employees where clearance >= min_clearance in job_titles
+CREATE POLICY clearance_policy ON abac_schema.employees
+    USING (EXISTS (
+        SELECT 1
+        FROM abac_schema.system_users u
+        JOIN abac_schema.job_titles j ON abac_schema.employees.job_id = j.job_id
+        WHERE u.username = current_user
+        AND u.clearance_level >= j.min_clearance
+    )); 
+
+-- Function to return only employees visible to a given username
+CREATE OR REPLACE FUNCTION abac_schema.get_employees_for_user(p_username TEXT)
+RETURNS TABLE(
+    emp_id INT,
+    full_name TEXT,
+    dept_id INT,
+    job_id INT
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT e.emp_id, e.full_name, e.dept_id, e.job_id
+    FROM abac_schema.employees e
+    JOIN abac_schema.system_users u
+      ON u.dept_id = e.dept_id
+    JOIN abac_schema.job_titles j
+      ON e.job_id = j.job_id
+    WHERE u.username = p_username
+      AND u.clearance_level >= j.min_clearance;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+
+
+
+--Evaluation Test Scenarios & SQL Scripts
+
+--1. Security Effectiveness
+--Goal: Can unauthorized users access sensitive data?
+--Scenario 1: Read access to employee data
+--DAC (Over-permissive by design)
+SET ROLE dac_bob;
+SELECT * FROM dac_schema.employees;
+
+--RBAC (Role-restricted)
+SET ROLE rbac_alice;
+SELECT * FROM rbac_schema.employees;
+
+SET ROLE rbac_alice;
+DELETE FROM rbac_schema.employees WHERE emp_id = 1;
+
+--MAC (Row-Level Security on documents)
+SET ROLE mac_low;
+SELECT * FROM mac_schema.documents;
+
+SET ROLE mac_high;
+SELECT * FROM mac_schema.documents;
+
+--ABAC (Attribute-based enforcement)
+SET ROLE abac_alice;
+SELECT * FROM abac_schema.get_employees_for_user(current_user);
+
+--2. Unauthorized Modification Attempt
+--Goal: Prevent illegal data modification
+--DAC
+SET ROLE dac_bob;
+UPDATE dac_schema.employees
+SET full_name = 'Hacked'
+WHERE emp_id = 1;
+
+SET ROLE dac_alice;
+UPDATE dac_schema.employees
+SET full_name = 'Updated'
+WHERE emp_id = 1;
+
+--RBAC
+SET ROLE rbac_alice;
+UPDATE rbac_schema.employees
+SET full_name = 'Updated'
+WHERE emp_id = 1;
+
+SET ROLE rbac_bob;
+UPDATE rbac_schema.employees
+SET full_name = 'Updated'
+WHERE emp_id = 1;
+
+--MAC
+SET ROLE mac_high;
+UPDATE mac_schema.documents
+SET content = 'Changed';
+
+--ABAC
+SET ROLE abac_bob;
+UPDATE abac_schema.employees
+SET full_name = 'Changed';
+
+
+--3.Privilege Granularity (Row Filtering)
+--Example (ABAC):
+SET ROLE abac_alice;
+SELECT emp_id, dept_id FROM abac_schema.employees;
+
+
+--4. Query Performance 
+EXPLAIN ANALYZE
+SELECT * FROM <schema>.employees;
+--MAC:
+EXPLAIN ANALYZE
+SELECT * FROM mac_schema.documents;
+--DAC:
+EXPLAIN ANALYZE
+SELECT * FROM dac_schema.employees;
+--RBAC:
+EXPLAIN ANALYZE
+SELECT * FROM rbac_schema.employees;
+--ABAC:
+EXPLAIN ANALYZE
+SELECT * FROM abac_schema.employees;
+
+
+
+--5. Scalability
+--Add new staff user
+
+--DAC
+CREATE ROLE dac_user_1 LOGIN PASSWORD 'Password123';
+GRANT SELECT ON ALL TABLES IN SCHEMA dac_schema TO dac_user_1;
+GRANT USAGE ON SCHEMA dac_schema TO dac_user_1;
+
+--RBAC
+CREATE ROLE rbac_user_1 LOGIN PASSWORD 'Password123';
+GRANT rbac_staff TO rbac_user_1;
+
+--MAC 
+CREATE ROLE mac_user_1 LOGIN PASSWORD 'Password123';
+GRANT USAGE ON SCHEMA mac_schema TO mac_user_1;
+
+-- ABAC 
+CREATE ROLE abac_user_1 LOGIN PASSWORD 'Password123';
+GRANT USAGE ON SCHEMA abac_schema TO abac_user_1;
+
+
+--6. Administrative Overhead
+--Model | Policy Change Cost
+--DAC | High - Need to update individual user privileges (many GRANTs)
+--RBAC | Medium - Update role privileges, users inherit changes (role redesign)
+--MAC | High - Change classification levels, update policies (relabel data)
+--ABAC | Low - Update policies/functions, no user changes needed (policy logic)
